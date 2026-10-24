@@ -30,77 +30,114 @@ from .recovery import (
 )
 
 
-# All known component names (lowercase → proper case)
-COMPONENT_NAMES = {
-    "main power station": "Main Power Station",
-    "main power supply": "Main Power Station",
-    "power station": "Main Power Station",
-    "power grid": "Main Power Station",
-    "power plant": "Main Power Station",
-    "main power": "Main Power Station",
-    "backup generator": "Backup Generator",
-    "generator": "Backup Generator",
-    "backup power": "Backup Generator",
-    "hospital": "Hospital",
-    "water treatment plant": "Water Treatment Plant",
-    "water plant": "Water Treatment Plant",
-    "water treatment": "Water Treatment Plant",
-    "telecom tower": "Telecom Tower",
-    "telecom": "Telecom Tower",
-    "cell tower": "Telecom Tower",
-    "transport hub": "Transport Hub",
-    "transport": "Transport Hub",
-    "emergency response center": "Emergency Response Center",
-    "emergency center": "Emergency Response Center",
-    "erc": "Emergency Response Center",
-    "alternative transport route": "Alternative Transport Route",
-    "alternative route": "Alternative Transport Route",
-    "alt route": "Alternative Transport Route",
+import difflib
+
+# Primary canonical component map with extensive aliases and keywords
+COMPONENT_MAP = {
+    "Main Power Station": [
+        "main power station", "main power supply", "power station", "power supply",
+        "power grid", "power plant", "main power", "power", "electricity", "electric grid"
+    ],
+    "Backup Generator": [
+        "backup generator", "generator", "backup power", "standby generator",
+        "auxiliary generator", "emergency generator", "backup"
+    ],
+    "Hospital": [
+        "hospital", "medical center", "clinic", "healthcare", "emergency hospital", "medical"
+    ],
+    "Water Treatment Plant": [
+        "water treatment plant", "water treatement plant", "water plant", "water treatment",
+        "water supply", "water filtration", "water facility", "water"
+    ],
+    "Telecom Tower": [
+        "telecom tower", "telecom", "cell tower", "cellular tower", "telecommunications",
+        "antenna", "radio tower", "comm tower", "communications"
+    ],
+    "Transport Hub": [
+        "transport hub", "transportation hub", "transport", "transit station",
+        "train station", "transit hub", "logistics hub", "transit"
+    ],
+    "Emergency Response Center": [
+        "emergency response center", "emergency center", "erc", "response center",
+        "disaster management", "emergency response", "emergency dispatch"
+    ],
+    "Alternative Transport Route": [
+        "alternative transport route", "alternative route", "alt route", "bypass",
+        "secondary route", "alternate route", "detour", "alternative transport"
+    ],
 }
 
 
 def _match_component(text: str) -> Optional[str]:
     """
-    Try to find a component name in the given text.
-    Returns the proper-case component name or None.
+    Find the best-matching infrastructure component in text using exact and fuzzy matching.
     """
     text_lower = text.lower()
-    # Try longest match first
-    for key in sorted(COMPONENT_NAMES.keys(), key=len, reverse=True):
-        if key in text_lower:
-            return COMPONENT_NAMES[key]
+
+    # 1. Exact alias match (longest alias first)
+    all_aliases = []
+    for comp, aliases in COMPONENT_MAP.items():
+        for a in aliases:
+            all_aliases.append((a, comp))
+    all_aliases.sort(key=lambda x: len(x[0]), reverse=True)
+
+    for alias, comp in all_aliases:
+        # Check whole words or substrings
+        if alias in text_lower:
+            return comp
+
+    # 2. Fuzzy match word n-grams (handles typos like 'treatement')
+    words = re.findall(r"\b[a-z]+\b", text_lower)
+    for n in (4, 3, 2, 1):
+        for i in range(len(words) - n + 1):
+            ngram = " ".join(words[i:i + n])
+            # Exclude very short stopwords
+            if len(ngram) < 4:
+                continue
+            matches = difflib.get_close_matches(
+                ngram, [a for a, _ in all_aliases], n=1, cutoff=0.75
+            )
+            if matches:
+                matched_alias = matches[0]
+                for a, comp in all_aliases:
+                    if a == matched_alias:
+                        return comp
+
     return None
 
 
 def _match_two_components(text: str) -> tuple[Optional[str], Optional[str]]:
     """
     Try to find two component names in text (for route checking).
-    Uses 'from X to Y' pattern first, then falls back to finding any two.
+    Uses 'from X to Y' pattern first, then falls back to finding any two distinct components.
     """
     text_lower = text.lower()
 
     # Try "from X to Y" pattern
-    route_match = re.search(r"from\s+(.+?)\s+to\s+(.+?)(?:\?|$|\.|!)", text_lower)
+    route_match = re.search(r"(?:from|between)\s+(.+?)\s+(?:to|and)\s+(.+?)(?:\?|$|\.|!)", text_lower)
     if route_match:
         src = _match_component(route_match.group(1))
         tgt = _match_component(route_match.group(2))
-        if src and tgt:
+        if src and tgt and src != tgt:
             return src, tgt
 
-    # Fallback: find all component mentions in order
+    # Fallback: scan for any two mentioned components
     found = []
-    for key in sorted(COMPONENT_NAMES.keys(), key=len, reverse=True):
-        idx = text_lower.find(key)
-        if idx >= 0:
-            found.append((idx, COMPONENT_NAMES[key]))
-            # Remove the found key to avoid overlapping matches
-            text_lower = text_lower[:idx] + ("_" * len(key)) + text_lower[idx + len(key):]
+    for comp in COMPONENT_MAP.keys():
+        if _match_component_in_text(comp, text_lower):
+            found.append(comp)
 
-    found.sort(key=lambda x: x[0])
     if len(found) >= 2:
-        return found[0][1], found[1][1]
+        return found[0], found[1]
 
     return None, None
+
+
+def _match_component_in_text(comp: str, text_lower: str) -> bool:
+    for a in COMPONENT_MAP.get(comp, []):
+        if a in text_lower:
+            return True
+    return False
 
 
 def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
@@ -131,13 +168,53 @@ def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
     if "help" in text_lower or text_lower in ("commands", "?", "what can you do"):
         return _help_text()
 
-    # --- Reset ---
-    if "reset" in text_lower or text_lower == "clear":
+    # --- Reset / Restart ---
+    if any(k in text_lower for k in ("reset", "restart", "clear", "reboot", "start over")):
         result = sim.reset()
         return f"✓ {result['message']}\nSeverity: {result['severity']['level']} (0%)"
 
+    # --- Fail / What happens if (Failure Simulation) ---
+    failure_keywords = (
+        "fail", "fails", "failure", "what happens", "what if", "affected if",
+        "stops working", "stop working", "stopped working", "breaks down",
+        "shut down", "shutdown", "goes down", "went down", "is down",
+        "outage", "blackout", "knock out", "knocked out", "offline", "simulate",
+        "disrupt", "impact of"
+    )
+    if any(k in text_lower for k in failure_keywords):
+        comp = _match_component(text_clean)
+        if comp:
+            result = sim.fail_component(comp)
+            if "error" in result:
+                # If already failed, provide the current impact report instead of a cold error
+                if "already failed" in result["error"].lower():
+                    affected = [n for n in sim.graph.nodes if sim.graph.nodes[n]["state"] in ("failed", "affected") and n != comp]
+                    sev = sim.calculate_severity()
+                    recs = sim._generate_recommendations()
+                    lines = [
+                        f"⚠ '{comp}' is already offline / in a failed state.\n",
+                        f"⚡ CURRENT IMPACT REPORT: {comp}",
+                    ]
+                    if affected:
+                        lines.append(f"\nDirectly & indirectly affected ({len(affected)}):")
+                        for a in affected:
+                            lines.append(f"  ⚠ {a}")
+                    lines.append(f"\nSeverity: {sev['level']} ({sev['score']}%)")
+                    lines.append(f"  {sev['description']}")
+                    if recs:
+                        lines.append("\nRecommendations:")
+                        for i, r in enumerate(recs, 1):
+                            lines.append(f"  {i}. {r}")
+                    lines.append(f"\n💡 Tip: Say 'Recover {comp}' to repair it, or 'Reset' to clear all failures.")
+                    return "\n".join(lines)
+                return f"✗ {result['error']}"
+            return _format_failure_report(result)
+        return ("Please specify a component, e.g.:\n"
+                "  'What happens if the Main Power Station fails?'\n"
+                "  'What if the Water Treatment Plant stops working?'")
+
     # --- Connected nodes / dependencies ---
-    if any(k in text_lower for k in ("connected", "supplies", "depends", "dependency", "links", "incoming", "outgoing")):
+    if any(k in text_lower for k in ("connected to", "connected", "supplies to", "supplies", "depends on", "dependency", "links", "incoming", "outgoing", "who uses", "feeds")):
         comp = _match_component(text_clean)
         if comp:
             successors = list(sim.graph.successors(comp))
@@ -156,11 +233,11 @@ def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
             return "\n".join(lines)
 
     # --- Status ---
-    if text_lower in ("status", "show status", "current status", "state"):
+    if any(k in text_lower for k in ("status", "show status", "current status", "state", "health", "overview")):
         return _format_status(sim)
 
     # --- Critical services ---
-    if "critical" in text_lower and ("service" in text_lower or "affected" in text_lower):
+    if "critical" in text_lower and ("service" in text_lower or "affected" in text_lower or "down" in text_lower):
         affected = sim.get_affected_critical_services()
         if not affected:
             return "All critical services are currently operational."
@@ -170,7 +247,7 @@ def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
         )
 
     # --- Route check ---
-    if "route" in text_lower or "path" in text_lower:
+    if any(k in text_lower for k in ("route", "path", "reach", "navigate", "access")):
         src, tgt = _match_two_components(text_clean)
         if src and tgt:
             return get_route_summary(sim, src, tgt)
@@ -178,29 +255,27 @@ def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
                 "  'Check route from Transport Hub to Emergency Response Center'")
 
     # --- Activate backup ---
-    if "activate" in text_lower:
-        comp = _match_component(text_clean)
-        if comp:
-            result = activate_backup(sim, comp)
-            if "error" in result:
-                node_state = sim.graph.nodes.get(comp, {}).get("state", "unknown")
-                if node_state in ("failed", "affected"):
-                    return (
-                        f"✗ '{comp}' is currently {node_state.upper()} from an earlier failure simulation.\n"
-                        f"👉 To use it, run: 'Recover {comp}' or 'Reset' first to restore the grid to operational state."
-                    )
-                return f"✗ {result['error']}\n💡 Tip: Say 'Status' to check grid state or 'Reset' to restore all systems."
-            restored = result.get("restored_services", [])
-            sev = result["severity"]
-            resp = f"✓ {comp} activated."
-            if restored:
-                resp += f"\nRestored services: {', '.join(restored)}"
-            resp += f"\nSeverity: {sev['level']} ({sev['score']}%)"
-            return resp
-        return "Please specify which backup to activate, e.g.: 'Activate Backup Generator'"
+    if any(k in text_lower for k in ("activate", "turn on", "switch on", "engage", "start backup", "run generator")):
+        comp = _match_component(text_clean) or "Backup Generator"
+        result = activate_backup(sim, comp)
+        if "error" in result:
+            node_state = sim.graph.nodes.get(comp, {}).get("state", "unknown")
+            if node_state in ("failed", "affected"):
+                return (
+                    f"✗ '{comp}' is currently {node_state.upper()} from an earlier failure simulation.\n"
+                    f"👉 To use it, run: 'Recover {comp}' or 'Reset' first to restore the grid to operational state."
+                )
+            return f"✗ {result['error']}\n💡 Tip: Say 'Status' to check grid state or 'Reset' to restore all systems."
+        restored = result.get("restored_services", [])
+        sev = result["severity"]
+        resp = f"✓ {comp} activated."
+        if restored:
+            resp += f"\nRestored services: {', '.join(restored)}"
+        resp += f"\nSeverity: {sev['level']} ({sev['score']}%)"
+        return resp
 
     # --- Recover ---
-    if "recover" in text_lower or "repair" in text_lower or "restore" in text_lower:
+    if any(k in text_lower for k in ("recover", "repair", "restore", "fix", "restart component", "bring back")):
         comp = _match_component(text_clean)
         if comp:
             result = recover_component(sim, comp)
@@ -215,29 +290,29 @@ def parse_and_execute(sim: InfraGuardSimulation, text: str) -> str:
             return resp
         return "Please specify which component to recover, e.g.: 'Recover Main Power Station'"
 
-    # --- Fail / What happens if ---
-    if ("fail" in text_lower or "what happens" in text_lower or
-            "simulate" in text_lower or "knock out" in text_lower):
-        comp = _match_component(text_clean)
-        if comp:
-            result = sim.fail_component(comp)
-            if "error" in result:
-                return f"✗ {result['error']}"
-            return _format_failure_report(result)
-        return ("Please specify a component, e.g.:\n"
-                "  'What happens if the Main Power Station fails?'\n"
-                "  'Fail Hospital'")
-
     # --- Compare / Resilience Twin ---
-    if "compare" in text_lower or "resilience twin" in text_lower or "twin" in text_lower:
+    if any(k in text_lower for k in ("compare", "resilience twin", "twin")):
         return _format_comparison_help(sim)
 
     # --- Recommendations ---
-    if "recommend" in text_lower or "suggestion" in text_lower:
+    if any(k in text_lower for k in ("recommend", "suggestion", "what should i do", "how to fix", "how to recover")):
         recs = sim._generate_recommendations()
         if not recs:
             return "No recommendations — all systems are operational."
         return "Recovery Recommendations:\n" + "\n".join(f"  {i}. {r}" for i, r in enumerate(recs, 1))
+
+    # --- Fallback: Single component inquiry ---
+    comp = _match_component(text_clean)
+    if comp:
+        state = sim.graph.nodes[comp]["state"]
+        return (
+            f"Component '{comp}' is currently {state.upper()}.\n\n"
+            f"You can ask:\n"
+            f"• 'What happens if {comp} fails?'\n"
+            f"• 'What nodes are connected to {comp}?'\n"
+            f"• 'Recover {comp}' (if failed)\n"
+            f"• 'Status'"
+        )
 
     # --- Fallback ---
     return (

@@ -15,6 +15,7 @@ Environment variables (in .env):
 
 import os
 import sys
+import asyncio
 import logging
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ agent = Agent(
     seed=SEED,
     port=PORT,
     mailbox=True,
+    handle_messages_concurrently=True,
 )
 
 logger.info(f"InfraGuard Agent address: {agent.address}")
@@ -75,13 +77,13 @@ chat_proto = Protocol(spec=chat_protocol_spec)
 
 @chat_proto.on_message(ChatMessage)
 async def handle_chat_message(ctx: Context, sender: str, msg: ChatMessage):
-    """Handle incoming Agent Chat Protocol messages."""
-    # 1. Acknowledge the message immediately
+    """Handle incoming Agent Chat Protocol messages with minimal latency."""
+    # 1. Fire-and-forget ACK concurrently so it doesn't block the actual reply
     ack = ChatAcknowledgement(
         acknowledged_msg_id=msg.msg_id,
         metadata={"status": "processing"},
     )
-    await ctx.send(sender, ack)
+    asyncio.create_task(ctx.send(sender, ack))
     logger.info(f"Received ChatMessage from {sender}: msg_id={msg.msg_id}")
 
     # 2. Extract text content
